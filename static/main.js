@@ -1,81 +1,138 @@
-const API_URL = ""; // Empty string means same origin (useful for simple deployment)
+const API_URL = "";
 
+// ============ UTILITIES ============
+function updateStatus(elementId, message) {
+    const el = document.getElementById(elementId);
+    if (el) el.textContent = message;
+}
+
+function getElement(id) {
+    return document.getElementById(id);
+}
+
+async function apiCall(endpoint, body = null) {
+    const options = {
+        method: body ? 'POST' : 'POST',
+        headers: { 'Content-Type': 'application/json' }
+    };
+    if (body) options.body = JSON.stringify(body);
+    
+    return fetch(`${API_URL}${endpoint}`, options);
+}
+
+// ============ INITIALIZATION ============
+window.onload = async function() {
+    console.log("Resetting DB...");
+    updateStatus('resetStatus', "Resetting DB...");
+    
+    try {
+        await apiCall('/reset');
+        updateStatus('resetStatus', "Memory Wiped & Ready");
+    } catch (e) {
+        updateStatus('resetStatus', "Reset Failed");
+    }
+};
+
+// ============ DATA INGESTION ============
 async function ingestData() {
-    const text = document.getElementById('corpusInput').value;
-    const statusEl = document.getElementById('ingestStatus');
-    const btn = document.getElementById('ingestBtn');
+    const text = getElement('corpusInput').value;
+    
+    if (!text) return alert("Paste text first!");
 
-    if (!text) return alert("Please enter some text first.");
-
+    const btn = getElement('ingestBtn');
     btn.disabled = true;
-    statusEl.textContent = "Chunking & Embedding...";
-    statusEl.style.color = "#64748b";
+    updateStatus('ingestStatus', "Chunking & Embedding...");
 
     try {
-        // CHANGED: Sending JSON body instead of URL params
-        const response = await fetch(`${API_URL}/ingest`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ text: text })
-        });
-        
+        const response = await apiCall('/ingest', { text });
         const data = await response.json();
-        statusEl.textContent = `Success! Indexed ${data.chunks} chunks.`;
-        statusEl.style.color = "green";
+        
+        handleIngestSuccess(data);
+        updateStatus('ingestStatus', `Success! Indexed ${data.chunks} chunks.`);
+        
     } catch (err) {
-        statusEl.textContent = "Error: " + err.message;
-        statusEl.style.color = "red";
+        updateStatus('ingestStatus', `Error: ${err.message}`);
     } finally {
         btn.disabled = false;
     }
 }
 
-async function askQuestion() {
-    const question = document.getElementById('queryInput').value;
-    const resArea = document.getElementById('resultsArea');
-    const btn = document.getElementById('askBtn');
+function handleIngestSuccess(data) {
+    const kbDisplay = getElement('kbDisplay');
+    const text = getElement('corpusInput').value;
     
-    if (!question) return alert("Please ask a question.");
+    if (kbDisplay.textContent.includes("(Memory is empty")) {
+        kbDisplay.textContent = "";
+    }
+    
+    const separator = kbDisplay.textContent.length > 0 ? "\n\n--------------------------------\n\n" : "";
+    const time = new Date().toLocaleTimeString();
+    kbDisplay.textContent += `${separator}[Update @ ${time}]\n${text}`;
+    kbDisplay.scrollTop = kbDisplay.scrollHeight;
+    getElement('corpusInput').value = "";
+}
 
+// ============ CHAT LOGIC ============
+function handleEnter(e) {
+    if (e.key === 'Enter') sendMessage();
+}
+
+async function sendMessage() {
+    const input = getElement('queryInput');
+    const question = input.value.trim();
+    
+    if (!question) return;
+
+    const history = getElement('chat-history');
+    const btn = getElement('sendBtn');
+
+    addMessageToHistory(history, question, 'user');
+    input.value = "";
     btn.disabled = true;
-    btn.textContent = "Thinking...";
-    resArea.style.display = 'none';
+
+    const loadingId = `loading-${Date.now()}`;
+    addMessageToHistory(history, "Thinking...", 'bot', loadingId);
 
     try {
-        const response = await fetch(`${API_URL}/chat`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ question: question })
-        });
-
+        const response = await apiCall('/chat', { question });
         const data = await response.json();
+        const loadingBubble = getElement(loadingId);
 
-        // Render Answer
-        // Simple regex to bold citations like [1]
-        let formattedAnswer = data.answer.replace(/\[(\d+)\]/g, '<b>[$1]</b>');
-        document.getElementById('answerText').innerHTML = formattedAnswer;
+        if (!response.ok || !data.answer) {
+            loadingBubble.innerHTML = `<span style="color: red;">⚠️ Error: ${data.detail || "Server issue"}</span>`;
+            return;
+        }
 
-        // Render Citations
-        const citationsDiv = document.getElementById('citationsList');
-        citationsDiv.innerHTML = '';
-        data.citations.forEach(cit => {
-            const div = document.createElement('div');
-            div.className = 'citation-box';
-            div.innerHTML = `<strong>[${cit.id}]</strong> ${cit.text.substring(0, 150)}...`;
-            citationsDiv.appendChild(div);
-        });
-
-        // Render Stats
-        document.getElementById('latency').textContent = `⏱️ Time: ${data.time_taken}s`;
-        // Rough estimate: Input + Output tokens logic (simplified)
-        document.getElementById('costEst').textContent = `💰 Est. Cost: < $0.0002`; 
-
-        resArea.style.display = 'block';
+        const htmlContent = formatResponse(data);
+        loadingBubble.innerHTML = htmlContent;
 
     } catch (err) {
-        alert("Failed to get answer: " + err.message);
+        getElement(loadingId).innerHTML = `<span style="color: red;">Connection Error: ${err.message}</span>`;
     } finally {
         btn.disabled = false;
-        btn.textContent = "Ask Question";
+        history.scrollTop = history.scrollHeight;
     }
+}
+
+function addMessageToHistory(history, text, role, id = null) {
+    const div = document.createElement('div');
+    div.className = `message ${role}`;
+    if (id) div.id = id;
+    div.textContent = text;
+    history.appendChild(div);
+    history.scrollTop = history.scrollHeight;
+}
+
+function formatResponse(data) {
+    let html = typeof marked !== 'undefined' ? marked.parse(data.answer) : data.answer;
+    
+    if (data.citations?.length > 0) {
+        html += '<div class="citation-block"><strong>Sources:</strong><br>';
+        data.citations.forEach(cit => {
+            html += `<span class="citation-item">[${cit.id}] ${cit.text.substring(0, 100)}...</span>`;
+        });
+        html += '</div>';
+    }
+    
+    return html;
 }

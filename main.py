@@ -1,96 +1,104 @@
 import os
 import time
 import uuid
-from fastapi import FastAPI, Body, HTTPException
+from fastapi import FastAPI, HTTPException
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
-import google.generativeai as genai
-from pinecone import Pinecone
+from google import genai 
+from pinecone import Pinecone, ServerlessSpec
 import cohere
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from dotenv import load_dotenv
 
-# Load environment variables from .env file (for local dev)
 load_dotenv()
+model_name = "gemini-3-flash-preview"
 
 app = FastAPI()
 
-# 1. Setup Clients
-# Check if keys are present to avoid runtime errors
+# --- 1. SETUP CLIENTS ---
 if not os.getenv("GOOGLE_API_KEY"):
-    raise ValueError("GOOGLE_API_KEY is missing")
+    raise ValueError("Missing GOOGLE_API_KEY in .env file")
 
-genai.configure(api_key=os.getenv("GOOGLE_API_KEY"))
+client = genai.Client(api_key=os.getenv("GOOGLE_API_KEY"))
+
 pc = Pinecone(api_key=os.getenv("PINECONE_API_KEY"))
-index = pc.Index("rag-app")
+index_name = "rag-app"
+
+# Auto-create Index
+existing_indexes = [i.name for i in pc.list_indexes()]
+if index_name not in existing_indexes:
+    print(f"Creating Pinecone index '{index_name}'...")
+    pc.create_index(
+        name=index_name,
+        dimension=768, 
+        metric="cosine",
+        spec=ServerlessSpec(cloud="aws", region="us-east-1")
+    )
+    while not pc.describe_index(index_name).status['ready']:
+        time.sleep(1)
+
+index = pc.Index(index_name)
 co = cohere.Client(os.getenv("CO_API_KEY"))
 
-# 2. Ingestion Logic
+# --- 2. RESET ENDPOINT (NEW) ---
+@app.post("/reset")
+async def reset_db():
+    try:
+        # Wipes everything in the index
+        index.delete(delete_all=True)
+        print(" -> DB Reset/Cleared.")
+        return {"status": "cleared"}
+    except Exception as e:
+        print(f"Reset Error: {e}")
+        return {"status": "error", "detail": str(e)}
+
+# --- 3. INGESTION ---
 class IngestRequest(BaseModel):
     text: str
 
-# ... inside main.py ...
-
 @app.post("/ingest")
 async def ingest_text(request: IngestRequest):
-    # A. Chunking
+    print(f"--- Processing {len(request.text)} chars ---")
+    
     splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=100)
     chunks = splitter.split_text(request.text)
     
-    # B. Embedding & Upserting
     vectors = []
     
-    print(f"Starting ingestion of {len(chunks)} chunks...")
-
     for i, chunk in enumerate(chunks):
-        # Generate a unique ID
         chunk_id = str(uuid.uuid4())
         
-        # --- RATE LIMIT HANDLING ---
-        retry_count = 0
-        max_retries = 3
-        while retry_count < max_retries:
+        # Retry logic for embeddings
+        for attempt in range(3):
             try:
-                embedding = genai.embed_content(
-                    model="models/embedding-001",
-                    content=chunk,
-                    task_type="retrieval_document"
-                )['embedding']
-                
-                vectors.append({
-                    "id": chunk_id, 
-                    "values": embedding, 
-                    "metadata": {"text": chunk, "source": "user-upload"}
-                })
-                
-                # Success! Break the retry loop
-                break 
+                response = client.models.embed_content(
+                    model="text-embedding-004",
+                    contents=chunk
+                )
+                if response and response.embeddings:
+                    embedding_values = response.embeddings[0].values
+                    vectors.append({
+                        "id": chunk_id, 
+                        "values": embedding_values, 
+                        "metadata": {"text": chunk}
+                    })
+                    break 
             except Exception as e:
-                if "429" in str(e):
-                    print(f"Hit rate limit on chunk {i}. Sleeping for 10s...")
-                    time.sleep(10) # Wait longer if we hit the limit
-                    retry_count += 1
-                else:
-                    print(f"Error embedding chunk {i}: {e}")
-                    break
+                print(f"Error on chunk {i+1}: {e}")
+                time.sleep(2)
         
-        # --- CRITICAL: SLEEP BETWEEN REQUESTS ---
-        # Sleep 2 seconds between every chunk to be nice to the API
-        time.sleep(2) 
-    
-    # C. Upsert to Pinecone
+        time.sleep(1) # Rate limit safety
+
     if vectors:
-        # Upsert in batches of 50 to avoid Pinecone size limits
-        batch_size = 50
-        for i in range(0, len(vectors), batch_size):
-            batch = vectors[i:i + batch_size]
-            index.upsert(vectors=batch)
-            
+        index.upsert(vectors=vectors)
+    
     return {"status": "indexed", "chunks": len(chunks)}
 
-# 3. Retrieval Logic
+
+# --- 4. CHAT (Updated Model) ---
 class QueryRequest(BaseModel):
     question: str
+
 
 @app.post("/chat")
 async def chat(req: QueryRequest):
@@ -98,63 +106,83 @@ async def chat(req: QueryRequest):
     
     try:
         # A. Embed Query
-        q_embed = genai.embed_content(
-            model="models/embedding-001",
-            content=req.question,
-            task_type="retrieval_query"
-        )['embedding']
-        
-        # B. Initial Retrieval (Top 10)
-        results = index.query(vector=q_embed, top_k=10, include_metadata=True)
-        
-        # Guard clause: If no matches found in DB
-        if not results['matches']:
-            return {
-                "answer": "I don't have any information on that topic in my database.",
-                "citations": [],
-                "time_taken": round(time.time() - start_time, 2)
-            }
-
-        docs = [match['metadata']['text'] for match in results['matches']]
-        
-        # C. Rerank (Top 3)
-        rerank_results = co.rerank(
-            model="rerank-english-v3.0",
-            query=req.question,
-            documents=docs,
-            top_n=3
+        q_resp = client.models.embed_content(
+            model="text-embedding-004",
+            contents=req.question
         )
+        q_embed = q_resp.embeddings[0].values
         
-        # Prepare Context
+        # B. Retrieve relevant documents from Pinecone
+        results = index.query(vector=q_embed, top_k=10, include_metadata=True)
+        docs = [
+            match['metadata']['text']
+            for match in results.get('matches', [])
+            if match.get('metadata', {}).get('text')
+        ]
+        
+        # C. Rerank documents if any were found
         final_context = ""
         used_docs = []
-        for idx, result in enumerate(rerank_results.results):
-            final_context += f"Source [{idx+1}]: {result.document['text']}\n\n"
-            used_docs.append({"id": idx+1, "text": result.document['text']})
-
-        # D. LLM Answer
-        model = genai.GenerativeModel('gemini-1.5-flash')
-        prompt = f"""
-        You are a helpful assistant. Answer the user's question using ONLY the context below. 
-        Cite the sources you used as [1], [2], etc.
-        If the answer is not in the context, state that you do not know.
         
+        if docs:
+            rerank_results = co.rerank(
+                model="rerank-english-v3.0",
+                query=req.question,
+                documents=docs,
+                top_n=3
+            )
+            
+            for idx, result in enumerate(rerank_results.results):
+                relevant_text = docs[result.index]
+                final_context += f"Source [{idx+1}]: {relevant_text}\n\n"
+                used_docs.append({"id": idx+1, "text": relevant_text})
+        else:
+            final_context = "No specific documents found."
+        
+        # D. Generate answer with context
+        prompt = f"""You are a helpful assistant.
+        INSTRUCTIONS:
+        1. Check the 'Context' below.
+        2. If the Context contains the answer, use it and cite like [1].
+        3. If Context is empty or irrelevant, use your own knowledge.
+        4. Answer naturally without mentioning missing context.
+
         Context:
         {final_context}
+
+        Question: {req.question}"""
         
-        Question: {req.question}
-        """
-        
-        response = model.generate_content(prompt)
+        answer_text = await _generate_answer(prompt)
         
         return {
-            "answer": response.text,
+            "answer": answer_text,
             "citations": used_docs,
             "time_taken": round(time.time() - start_time, 2)
         }
-        
+
     except Exception as e:
+        print(f"Chat Error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
-# Serve Frontend
+
+async def _generate_answer(prompt: str) -> str:
+    """Generate answer using primary model, fallback to backup if needed."""
+    try:
+        gen_resp = client.models.generate_content(
+            model=model_name,
+            contents=prompt
+        )
+        return gen_resp.text
+    
+    except Exception as e:
+        if "429" in str(e) or "Quota" in str(e):
+            print("⚠️ Primary model rate limited. Switching to backup...")
+            gen_resp = client.models.generate_content(
+                model="gemini-2.5-flash",
+                contents=prompt
+            )
+            return gen_resp.text
+        
+        raise
+
 app.mount("/", StaticFiles(directory="static", html=True), name="static")

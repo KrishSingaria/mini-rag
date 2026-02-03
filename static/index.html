@@ -3,41 +3,48 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Mini RAG Assessment</title>
+    <title>Mini RAG Chat</title>
+    
+    <script src="https://cdn.jsdelivr.net/npm/marked@4.3.0/marked.min.js"></script>
+    
     <link rel="stylesheet" href="styles.css">
 </head>
 <body>
 
-    <h1>Mini RAG Assessment (Track B) Krish B23143 IIT Mandi</h1>
-
-    <div class="container">
-        <div class="card">
-            <h2>1. Knowledge Base</h2>
-            <p style="font-size: 0.9rem; color: #666;">Paste text or content here to "train" the RAG system.</p>
-            <textarea id="corpusInput" rows="5" placeholder="Paste your document text here..."></textarea>
-            <button onclick="ingestData()" id="ingestBtn">Upsert to Vector DB</button>
-            <div id="ingestStatus" id="status"></div>
+    <div class="chat-container">
+        <header>
+            <h2>Mini RAG Chat (Hybrid)</h2>
+            <span id="resetStatus" class="reset-status">Ready</span>
+        </header>
+        
+        <div id="chat-history">
+            <div class="message bot">
+                Hello! I've cleared my memory. Please upload some text on the right side so I can learn from it!
+            </div>
         </div>
 
-        <div class="card">
-            <h2>2. Ask a Question</h2>
-            <input type="text" id="queryInput" placeholder="Ask something about the text above...">
-            <button onclick="askQuestion()" id="askBtn">Ask Question</button>
+        <div class="input-area">
+            <input type="text" id="queryInput" placeholder="Ask a question about your documents..." aria-label="Ask a question about your documents" onkeypress="handleEnter(event)">
+            <button onclick="sendMessage()" id="sendBtn">Send</button>
+        </div>
+    </div>
 
-            <div id="resultsArea" style="display: none; margin-top: 2rem;">
-                <h3>Answer:</h3>
-                <div id="answerText" class="answer-box"></div>
-                
-                <h3>Sources Used (Reranked):</h3>
-                <div id="citationsList"></div>
+    <div class="sidebar">
+        <div>
+            <h2>1. Add Knowledge</h2>
+            <textarea id="corpusInput" placeholder="Paste article/text here..."></textarea>
+            <button onclick="ingestData()" id="ingestBtn" class="upload-btn">Upload to Brain</button>
+            <div id="ingestStatus" class="status"></div>
+        </div>
 
-                <div class="meta-info">
-                    <span id="latency"></span>
-                    <span id="costEst"></span>
-                </div>
+        <div class="kb-container">
+            <h2>Current Knowledge Base</h2>
+            <div id="kbDisplay" class="knowledge-display">
+                (Memory is empty. Upload text above.)
             </div>
         </div>
     </div>
-    <script src="main.js"></script>
+
+    <script src="main.js" defer></script>
 </body>
 </html>
