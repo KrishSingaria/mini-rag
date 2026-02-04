@@ -9,7 +9,7 @@ It features a "Hybrid" chat mode that answers from your uploaded documents (with
 
 ## Architecture
 
-![Architecture Diagram](architecture.png)
+![Architecture Diagram](Architecture.png)
 
 ## Tech Stack & Parameters
 
