@@ -1,5 +1,8 @@
 # Mini RAG Assessment (Track B)
 
+[live link](https://mini-rag-67p9.onrender.com)
+>Its on Render free instance so it may be spin down with inactivity, which can delay requests by 50 seconds or more, it does not support concurrent requests, and it may hit rate limits on the LLM API, but it should work for basic testing.
+
 A lightweight, hybrid Retrieval-Augmented Generation (RAG) system built with **FastAPI**, **Pinecone**, and **Google Gemini**.
 
 It features a "Hybrid" chat mode that answers from your uploaded documents (with citations) but gracefully falls back to general knowledge for outside queries.
